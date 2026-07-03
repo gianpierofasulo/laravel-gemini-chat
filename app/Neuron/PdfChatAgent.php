@@ -3,37 +3,62 @@
 namespace App\Neuron;
 
 use NeuronAI\Agent\Agent;
+use NeuronAI\Agent\SystemPrompt;
 use NeuronAI\Providers\AIProviderInterface;
-use NeuronAI\Providers\Gemini\Gemini;
-
-// Importa il tuo nuovo Tool
 use App\Neuron\Tools\WebSearchTool;
+
+// Namespace ufficiali di Neuron AI
+use NeuronAI\Providers\Gemini\Gemini; 
+use NeuronAI\Providers\OpenAI\OpenAI;
 
 class PdfChatAgent extends Agent
 {
+    /**
+     * Definizione dinamica del Provider AI conforme a AIProviderInterface
+     */
     protected function provider(): AIProviderInterface
     {
-        return new Gemini(
-            key: env('GEMINI_API_KEY'),
-            model: env('GEMINI_MODEL', 'gemini-2.0-flash')
+        $providerName = session('ai_provider', env('AI_PROVIDER', 'google'));
+        $model = session('ai_model', env('GEMINI_MODEL', 'gemini-1.5-flash'));
+        
+        // 🎯 RECUPERO CHIAVE CON FALLBACK MULTIPLI PER EVITARE IL VALORE NULL
+        $apiKey = session('ai_key') 
+            ?: env('GEMINI_API_KEY') 
+            ?: env('GEMINI_KEY') 
+            ?: env('GOOGLE_API_KEY') 
+            ?: ''; // Se non trova nulla, passa una stringa vuota anziché null per evitare il crash di tipo
+
+        if ($providerName === 'openai') {
+            $openAiKey = session('ai_key') ?: env('OPENAI_API_KEY') ?: '';
+            return new OpenAI(key: $openAiKey, model: $model);
+        }
+
+        // Default: Google Gemini - Riceve sempre una stringa (anche se vuota) evitando l'errore di tipo
+        return new Gemini(key: $apiKey, model: $model);
+    }
+
+    /**
+     * Istruzioni di sistema dell'agente (System Prompt)
+     */
+    public function instructions(): string
+    {
+        return (string) new SystemPrompt(
+            background: ["Sei un assistente AI avanzato integrato con il framework Neuron AI."],
+            steps: ["Rispondi sempre in modo chiaro, preciso e cordiale in lingua italiana."]
         );
     }
 
     /**
-     * 🌐 REGISTRAZIONE DEI TOOL 🌐
-     * Fornisce all'agente l'accesso a strumenti esterni
+     * Registrazione condizionale dei Tool (Ricerca Internet)
      */
-    protected function tools(): array
+    public function tools(): array
     {
+        if (session('disable_search', false) === true) {
+            return [];
+        }
+
         return [
             new WebSearchTool()
         ];
-    }
-
-    protected function instructions(): string
-    {
-        return "Sei un assistente AI avanzato integrato nell'ecosistema Neuron AI Stack. " .
-               "Hai la capacità di combinare i documenti PDF forniti dall'utente con ricerche in tempo reale su Internet. " .
-               "Se l'utente ti fa una domanda su eventi recenti, codici, leggi aggiornate o dati mancanti, utilizza immediatamente lo strumento 'web_search' per verificare le informazioni prima di rispondere.";
     }
 }

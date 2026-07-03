@@ -28,14 +28,37 @@ class ChatController extends Controller
     }
 
     /**
-     * Gestione dell'invio messaggi con Neuron AI Framework
+     * Salva i parametri di configurazione dell'utente nella Sessione di Laravel
+     */
+    public function saveConfig(Request $request)
+    {
+        $request->validate([
+            'ai_provider' => 'required|string',
+            'ai_model'    => 'required|string',
+            'ai_key'      => 'nullable|string',
+            'tavily_key'  => 'nullable|string',
+        ]);
+
+        session([
+            'ai_provider'    => $request->input('ai_provider'),
+            'ai_model'       => $request->input('ai_model'),
+            'ai_key'         => $request->input('ai_key'),
+            'tavily_key'     => $request->input('tavily_key'),
+            'disable_search' => $request->has('disable_search'),
+        ]);
+
+        return redirect()->back();
+    }
+
+    /**
+     * Gestione dell'invio messaggi tramite la sintassi ufficiale di Neuron AI Agent
      */
     public function send(Request $request, $id = null)
     {
         $prompt = $request->input('message');
         $prompt = $prompt ? trim($prompt) : '';
 
-        $context = "";
+        $contextText = "";
         $fileName = null;
 
         if ($id) {
@@ -56,18 +79,18 @@ class ChatController extends Controller
                 $pdfDocument = $pdfParser->parseFile($file->getPathname());
                 $rawText = $pdfDocument->getText();
 
-                $context = mb_convert_encoding($rawText, 'UTF-8', 'UTF-8');
-                $context = str_replace(["\r", "\n", "\t"], " ", $context);
-                $context = preg_replace('/\s+/', ' ', $context);
-                $context = trim($context);
+                $contextText = mb_convert_encoding($rawText, 'UTF-8', 'UTF-8');
+                $contextText = str_replace(["\r", "\n", "\t"], " ", $contextText);
+                $contextText = preg_replace('/\s+/', ' ', $contextText);
+                $contextText = trim($contextText);
 
-                if (empty($context)) {
-                    $context = "[Il file PDF '$fileName' non contiene testo selezionabile]";
+                if (empty($contextText)) {
+                    $contextText = "[Il file PDF '$fileName' non contiene testo selezionabile]";
                 }
 
             } catch (\Exception $e) {
                 Log::error('Errore estrazione PDF: ' . $e->getMessage());
-                $context = "[Errore di lettura del file '$fileName']";
+                $contextText = "[Errore di lettura del file '$fileName']";
             }
 
             $chat->messages()->create([
@@ -77,15 +100,23 @@ class ChatController extends Controller
             ]);
 
             $finalQuestion = !empty($prompt) ? $prompt : "Fai un riassunto di questo documento";
-            $fullAgentPrompt = "Nome Documento: $fileName\nContesto Estratto: $context\n\nRichiesta Utente: $finalQuestion";
+            $fullAgentPrompt = "Nome Documento: $fileName\nContesto Estratto: $contextText\n\nRichiesta Utente: $finalQuestion";
 
             try {
-                $agent = PdfChatAgent::make();
-                $neuronResponse = $agent->chat(new UserMessage($fullAgentPrompt));
-                $aiResponse = $neuronResponse->getMessage()->getContent();
+                $agentInstance = PdfChatAgent::make()
+                    ->chat(new UserMessage($fullAgentPrompt));
+                    
+                $messageInstance = $agentInstance->getMessage();
+                $aiResponse = $messageInstance->getContent();
             } catch (\Exception $e) {
                 Log::error("Errore agente su PDF: " . $e->getMessage());
-                $aiResponse = "Si è verificato un errore nell'elaborazione del documento.";
+                
+                // 🎯 GESTIONE ERRORE NOT FOUND (404) SUL MODELLO
+                if (str_contains($e->getMessage(), '404') || str_contains($e->getMessage(), 'not found')) {
+                    $aiResponse = "❌ **Errore di Configurazione Modello (HTTP 404)**\n\nIl modello selezionato (*" . session('ai_model') . "*) non è stato trovato o non è supportato dal provider AI.\n\nPer favore, clicca sull'icona a forma di ingranaggio ⚙️ in alto a destra per cambiare il modello di IA (es. inserisci `gemini-1.5-flash` o `gemini-1.5-pro`) e riprova.";
+                } else {
+                    $aiResponse = "Si è verificato un errore nell'elaborazione del documento: " . $e->getMessage();
+                }
             }
 
             $chat->messages()->create([
@@ -96,7 +127,7 @@ class ChatController extends Controller
             return redirect()->route('chat.show', $chat->id);
         }
 
-        // 2. Caso standard: solo messaggio testuale senza file (Attiva la ricerca Web)
+        // 2. Caso standard: solo messaggio testuale senza file
         if (!empty($prompt)) {
             $chat->messages()->create([
                 'role' => 'user',
@@ -104,21 +135,29 @@ class ChatController extends Controller
             ]);
 
             try {
-                Log::info("Inizio sessione agente Neuron per prompt testuale.");
-                $agent = PdfChatAgent::make();
+                Log::info("Inizio esecuzione Agente Neuron per prompt testuale.");
                 
-                $neuronResponse = $agent->chat(new UserMessage($prompt));
-                $aiResponse = $neuronResponse->getMessage()->getContent();
+                $agentInstance = PdfChatAgent::make()
+                    ->chat(new UserMessage($prompt));
+
+                $messageInstance = $agentInstance->getMessage();
+                $aiResponse = $messageInstance->getContent();
                 
-                Log::info("Risposta ricevuta dall'agente Neuron: " . ($aiResponse ?? 'VUOTA'));
+                Log::info("Risposta ricevuta dall'Agente Neuron: " . ($aiResponse ?? 'VUOTA'));
 
                 if (empty($aiResponse)) {
-                    $aiResponse = "L'agente ha eseguito la ricerca richiesta su Internet, ma la risposta è rimasta vuota. Riprova.";
+                    $aiResponse = "L'agente ha elaborato la richiesta, ma la risposta è rimasta vuota.";
                 }
 
             } catch (\Exception $e) {
                 Log::error("CRASH NEURON FRAMEWORK NELLA RISPOSTA: " . $e->getMessage());
-                $aiResponse = "Errore di comunicazione interna durante la ricerca online.";
+                
+                // 🎯 GESTIONE ERRORE NOT FOUND (404) SUL MODELLO PER MESSAGGI TESTUALI
+                if (str_contains($e->getMessage(), '404') || str_contains($e->getMessage(), 'not found')) {
+                    $aiResponse = "❌ **Errore di Configurazione Modello (HTTP 404)**\n\nIl modello selezionato (*" . session('ai_model') . "*) non è stato trovato o non è più supportato per questa chiamata.\n\nPer favore, clicca sull'icona a forma di ingranaggio ⚙️ in alto a destra, sostituisci il testo del modello attuale con un modello valido (come `gemini-1.5-flash`) e salva la configurazione.";
+                } else {
+                    $aiResponse = "Errore di comunicazione interna durante l'esecuzione dell'agente: " . $e->getMessage();
+                }
             }
             
             $chat->messages()->create([
@@ -130,43 +169,26 @@ class ChatController extends Controller
         return redirect()->to('/chat/' . $chat->id);
     }
 
-    /**
-     * 🎯 NUOVO: Rinomina la chat
-     */
     public function update(Request $request, $id)
     {
         $chat = Chat::findOrFail($id);
-        $request->validate([
-            'title' => 'required|string|max:255'
-        ]);
-
-        $chat->update([
-            'title' => $request->input('title')
-        ]);
-
+        $request->validate(['title' => 'required|string|max:255']);
+        $chat->update(['title' => $request->input('title')]);
         return redirect()->back();
     }
 
-    /**
-     * 🎯 NUOVO: Elimina la chat e tutti i suoi messaggi collegati
-     */
     public function destroy($id)
     {
         $chat = Chat::findOrFail($id);
-        
-        // Se eliminiamo la chat attualmente visualizzata, dovremo reindirizzare alla home
         $currentUrl = url()->previous();
         $isCurrent = str_contains($currentUrl, '/chat/' . $id);
 
-        // I messaggi associati si cancellano automaticamente se hai impostato la foreign key con onDelete('cascade')
-        // Altrimenti li eliminiamo esplicitamente qui prima della chat:
         $chat->messages()->delete();
         $chat->delete();
 
         if ($isCurrent) {
             return redirect()->route('chat.index');
         }
-
         return redirect()->back();
     }
 }
