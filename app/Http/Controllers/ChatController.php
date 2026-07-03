@@ -38,7 +38,6 @@ class ChatController extends Controller
         $context = "";
         $fileName = null;
 
-        // Recuperiamo o creiamo la chat nel database locale
         if ($id) {
             $chat = Chat::findOrFail($id);
         } else {
@@ -63,15 +62,6 @@ class ChatController extends Controller
                 $context = trim($context);
 
                 if (empty($context)) {
-                    $details = $pdfDocument->getDetails();
-                    $metaString = "";
-                    if (is_array($details)) {
-                        foreach ($details as $key => $value) {
-                            if (is_string($value)) {
-                                $metaString .= "$key: $value; ";
-                            }
-                        }
-                    }
                     $context = "[Il file PDF '$fileName' non contiene testo selezionabile]";
                 }
 
@@ -80,7 +70,6 @@ class ChatController extends Controller
                 $context = "[Errore di lettura del file '$fileName']";
             }
 
-            // Salva il messaggio utente nel DB locale
             $chat->messages()->create([
                 'role' => 'user',
                 'content' => !empty($prompt) ? $prompt : "Analizza il file allegato ed esponi il contenuto.",
@@ -109,7 +98,6 @@ class ChatController extends Controller
 
         // 2. Caso standard: solo messaggio testuale senza file (Attiva la ricerca Web)
         if (!empty($prompt)) {
-            // Salva immediatamente il messaggio dell'utente nel DB
             $chat->messages()->create([
                 'role' => 'user',
                 'content' => $prompt
@@ -119,7 +107,6 @@ class ChatController extends Controller
                 Log::info("Inizio sessione agente Neuron per prompt testuale.");
                 $agent = PdfChatAgent::make();
                 
-                // Chiamata singola sincrona che gestisce internamente il tool
                 $neuronResponse = $agent->chat(new UserMessage($prompt));
                 $aiResponse = $neuronResponse->getMessage()->getContent();
                 
@@ -134,16 +121,52 @@ class ChatController extends Controller
                 $aiResponse = "Errore di comunicazione interna durante la ricerca online.";
             }
             
-            // Salvataggio sul DB locale
             $chat->messages()->create([
                 'role' => 'assistant',
                 'content' => $aiResponse
             ]);
-            
-            Log::info("Risposta dell'assistente salvata con successo nel DB per la chat ID: " . $chat->id);
         }
 
-        // Reindirizziamo in modo rigido e sincrono alla rotta della chat specifica
         return redirect()->to('/chat/' . $chat->id);
+    }
+
+    /**
+     * 🎯 NUOVO: Rinomina la chat
+     */
+    public function update(Request $request, $id)
+    {
+        $chat = Chat::findOrFail($id);
+        $request->validate([
+            'title' => 'required|string|max:255'
+        ]);
+
+        $chat->update([
+            'title' => $request->input('title')
+        ]);
+
+        return redirect()->back();
+    }
+
+    /**
+     * 🎯 NUOVO: Elimina la chat e tutti i suoi messaggi collegati
+     */
+    public function destroy($id)
+    {
+        $chat = Chat::findOrFail($id);
+        
+        // Se eliminiamo la chat attualmente visualizzata, dovremo reindirizzare alla home
+        $currentUrl = url()->previous();
+        $isCurrent = str_contains($currentUrl, '/chat/' . $id);
+
+        // I messaggi associati si cancellano automaticamente se hai impostato la foreign key con onDelete('cascade')
+        // Altrimenti li eliminiamo esplicitamente qui prima della chat:
+        $chat->messages()->delete();
+        $chat->delete();
+
+        if ($isCurrent) {
+            return redirect()->route('chat.index');
+        }
+
+        return redirect()->back();
     }
 }
