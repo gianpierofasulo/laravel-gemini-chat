@@ -3,20 +3,16 @@
 namespace App\Http\Controllers;
 
 use App\Models\Chat;
-use App\Services\AI\LLMServiceInterface;
 use Illuminate\Http\Request;
 use Smalot\PdfParser\Parser;
 use Illuminate\Support\Facades\Log;
 
+// Classi native del framework Neuron AI
+use App\Neuron\PdfChatAgent;
+use NeuronAI\Chat\Messages\UserMessage;
+
 class ChatController extends Controller
 {
-    protected LLMServiceInterface $aiService;
-
-    public function __construct(LLMServiceInterface $aiService)
-    {
-        $this->aiService = $aiService;
-    }
-
     public function index()
     {
         $chats = Chat::with('messages')->latest()->get();
@@ -32,17 +28,17 @@ class ChatController extends Controller
     }
 
     /**
-     * Invia il messaggio leggendo correttamente il testo in qualsiasi formato di richiesta
+     * Gestione dell'invio messaggi con Neuron AI Framework
      */
     public function send(Request $request, $id = null)
     {
-        // Estrazione sicura: controlla prima l'input standard, poi il flusso JSON
-        $prompt = $request->input('message') ?? ($request->isJson() ? $request->json('message') : '');
-        $prompt = trim($prompt);
+        $prompt = $request->input('message');
+        $prompt = $prompt ? trim($prompt) : '';
 
         $context = "";
         $fileName = null;
 
+        // Recuperiamo o creiamo la chat nel database locale
         if ($id) {
             $chat = Chat::findOrFail($id);
         } else {
@@ -51,7 +47,7 @@ class ChatController extends Controller
             ]);
         }
 
-        // Gestione dell'allegato PDF
+        // 1. Caso: Caricamento ed Estrazione testo dal file PDF
         if ($request->hasFile('file') && $request->file('file')->isValid()) {
             $file = $request->file('file');
             $fileName = $file->getClientOriginalName();
@@ -76,26 +72,32 @@ class ChatController extends Controller
                             }
                         }
                     }
-                    $context = "[NOTA DI SISTEMA: Il file PDF '$fileName' è stato caricato ma non contiene testo vettoriale selezionabile. Potrebbe essere una scansione o un'immagine. Metadati estratti: $metaString]";
+                    $context = "[Il file PDF '$fileName' non contiene testo selezionabile]";
                 }
 
             } catch (\Exception $e) {
                 Log::error('Errore estrazione PDF: ' . $e->getMessage());
-                $context = "[NOTA DI SISTEMA: Errore di lettura dei vettori di testo per il file '$fileName'. Dimensione: " . $file->getSize() . " bytes]";
+                $context = "[Errore di lettura del file '$fileName']";
             }
 
-            // SALVA LA TUA VERA DOMANDA (Usa la stringa fissa SOLO se hai lasciato il campo vuoto)
+            // Salva il messaggio utente nel DB locale
             $chat->messages()->create([
                 'role' => 'user',
                 'content' => !empty($prompt) ? $prompt : "Analizza il file allegato ed esponi il contenuto.",
                 'file_name' => $fileName
             ]);
 
-            // Sistema di istruzioni per Gemini basato sulla TUA domanda reale
             $finalQuestion = !empty($prompt) ? $prompt : "Fai un riassunto di questo documento";
-            $systemInstruction = "L'utente ti ha inviato un file denominato '$fileName'. Se il contesto allegato indica che non è stato possibile estrarre testo nativo (perché è un PDF scansionato o protetto), non limitarti a dire che è vuoto. Spiega all'utente in modo cortese che il documento appare come un'immagine/scansione non digitalizzata, formula un'ipotesi sul contenuto basandoti sul nome del file e sulla domanda dell'utente ('{$finalQuestion}'), e offri indicazioni su come procedere.\n\n";
+            $fullAgentPrompt = "Nome Documento: $fileName\nContesto Estratto: $context\n\nRichiesta Utente: $finalQuestion";
 
-            $aiResponse = $this->aiService->chat($systemInstruction . $finalQuestion, $context);
+            try {
+                $agent = PdfChatAgent::make();
+                $neuronResponse = $agent->chat(new UserMessage($fullAgentPrompt));
+                $aiResponse = $neuronResponse->getMessage()->getContent();
+            } catch (\Exception $e) {
+                Log::error("Errore agente su PDF: " . $e->getMessage());
+                $aiResponse = "Si è verificato un errore nell'elaborazione del documento.";
+            }
 
             $chat->messages()->create([
                 'role' => 'assistant',
@@ -105,25 +107,43 @@ class ChatController extends Controller
             return redirect()->route('chat.show', $chat->id);
         }
 
-        // Caso standard di solo testo senza file
+        // 2. Caso standard: solo messaggio testuale senza file (Attiva la ricerca Web)
         if (!empty($prompt)) {
+            // Salva immediatamente il messaggio dell'utente nel DB
             $chat->messages()->create([
                 'role' => 'user',
                 'content' => $prompt
             ]);
 
-            $aiResponse = $this->aiService->chat($prompt, null);
+            try {
+                Log::info("Inizio sessione agente Neuron per prompt testuale.");
+                $agent = PdfChatAgent::make();
+                
+                // Chiamata singola sincrona che gestisce internamente il tool
+                $neuronResponse = $agent->chat(new UserMessage($prompt));
+                $aiResponse = $neuronResponse->getMessage()->getContent();
+                
+                Log::info("Risposta ricevuta dall'agente Neuron: " . ($aiResponse ?? 'VUOTA'));
+
+                if (empty($aiResponse)) {
+                    $aiResponse = "L'agente ha eseguito la ricerca richiesta su Internet, ma la risposta è rimasta vuota. Riprova.";
+                }
+
+            } catch (\Exception $e) {
+                Log::error("CRASH NEURON FRAMEWORK NELLA RISPOSTA: " . $e->getMessage());
+                $aiResponse = "Errore di comunicazione interna durante la ricerca online.";
+            }
             
+            // Salvataggio sul DB locale
             $chat->messages()->create([
                 'role' => 'assistant',
                 'content' => $aiResponse
             ]);
+            
+            Log::info("Risposta dell'assistente salvata con successo nel DB per la chat ID: " . $chat->id);
         }
 
-        if ($request->expectsJson() || $request->isJson()) {
-            return response()->json(['success' => true, 'chat_id' => $chat->id]);
-        }
-
-        return redirect()->route('chat.show', $chat->id);
+        // Reindirizziamo in modo rigido e sincrono alla rotta della chat specifica
+        return redirect()->to('/chat/' . $chat->id);
     }
 }
