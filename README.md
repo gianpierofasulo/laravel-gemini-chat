@@ -3,7 +3,8 @@
 
 Benvenuti in **Laravel Gemini Chat**, un'applicazione enterprise-ready progettata per l'orchestrazione agentica, la chat contestuale basata su documenti (RAG) e la gestione dinamica dei Large Language Models (LLM). 
 
-Il progetto sfrutta la potenza del framework **Neuron AI** per implementare un sistema di **Routing nativo (Waterfall)** capace di garantire l'alta affidabilità (High Availability) delle chiamate AI, integrando dinamicamente **Google Gemini** e un provider custom ottimizzato per **Groq**.
+Il progetto sfrutta la potenza del framework **Neuron AI** per implementare un sistema 
+di **Routing nativo (Waterfall)** capace di garantire l'alta affidabilità (High Availability) delle chiamate AI, integrando dinamicamente **Google Gemini** e un provider custom ottimizzato per **Groq**.
 
 ---
 
@@ -34,7 +35,8 @@ Inoltre, per rimuovere del tutto le dipendenze da OpenAI, è stato sviluppato un
 
 ##  Guida all'Installazione in Locale (Passo-Passo)
 
-Segui questi passaggi per clonare, configurare e avviare l'applicazione nel tuo ambiente di sviluppo locale utilizzando Docker.
+Segui questi passaggi per clonare, configurare e avviare l'applicazione nel tuo ambiente
+di sviluppo locale utilizzando Docker.
 
 ### 1. Clonare il Repository
 Apri il terminale e clona il progetto posizionandoti nella cartella dei tuoi progetti:
@@ -139,6 +141,5 @@ In caso di stringhe errate digitate dall'utente nel form, l'applicazione non and
 
 - **Arrestare lo stack Docker:** `./vendor/bin/sail down`
 - **Svuotare le cache in caso di modifiche strutturali all'Agente:** `./vendor/bin/sail artisan cache:clear`
-- **Ispezionare i log di errore dell'Agente AI:** `./vendor/bin/sail artisan log:tail`  
-
+- **Ispezionare i log di errore dell'Agente AI:** `./vendor/bin/sail artisan log:tail`
 
