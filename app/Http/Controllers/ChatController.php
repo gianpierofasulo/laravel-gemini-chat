@@ -7,28 +7,33 @@ use Illuminate\Http\Request;
 use Smalot\PdfParser\Parser;
 use Illuminate\Support\Facades\Log;
 
-// Classi native del framework Neuron AI
+// Agente personalizzato e classi del framework Neuron AI
 use App\Neuron\PdfChatAgent;
 use NeuronAI\Chat\Messages\UserMessage;
 
 class ChatController extends Controller
 {
+    /**
+     * Mostra la schermata principale con lo storico delle chat
+     */
     public function index()
     {
         $chats = Chat::with('messages')->latest()->get();
         return view('chat', compact('chats'));
     }
 
+    /**
+     * Mostra una specifica sessione di chat attiva
+     */
     public function show($id)
     {
         $chats = Chat::latest()->get();
         $currentChat = Chat::with('messages')->findOrFail($id);
-        
         return view('chat', compact('chats', 'currentChat'));
     }
 
     /**
-     * Salva i parametri di configurazione dell'utente nella Sessione di Laravel
+     * Salva le configurazioni della modale (Provider, Modello, API Key) in Sessione
      */
     public function saveConfig(Request $request)
     {
@@ -51,16 +56,15 @@ class ChatController extends Controller
     }
 
     /**
-     * Gestione dell'invio messaggi tramite la sintassi ufficiale di Neuron AI Agent
+     * Gestisce l'invio dei messaggi (Testo semplice o file PDF)
      */
     public function send(Request $request, $id = null)
     {
-        $prompt = $request->input('message');
-        $prompt = $prompt ? trim($prompt) : '';
-
+        $prompt = $request->input('message') ? trim($request->input('message')) : '';
         $contextText = "";
         $fileName = null;
 
+        // Recupera o crea la sessione di chat
         if ($id) {
             $chat = Chat::findOrFail($id);
         } else {
@@ -69,7 +73,11 @@ class ChatController extends Controller
             ]);
         }
 
-        // 1. Caso: Caricamento ed Estrazione testo dal file PDF
+        // Recuperiamo i dati correnti per l'eventuale stringa di errore del banner
+        $chosenProvider = session('ai_provider', env('AI_PROVIDER', 'google'));
+        $chosenModel = session('ai_model', env('GEMINI_MODEL', 'gemini-3.1-flash-lite'));
+
+        // SCENARIO 1: Elaborazione file PDF
         if ($request->hasFile('file') && $request->file('file')->isValid()) {
             $file = $request->file('file');
             $fileName = $file->getClientOriginalName();
@@ -77,98 +85,75 @@ class ChatController extends Controller
             try {
                 $pdfParser = new Parser();
                 $pdfDocument = $pdfParser->parseFile($file->getPathname());
-                $rawText = $pdfDocument->getText();
-
-                $contextText = mb_convert_encoding($rawText, 'UTF-8', 'UTF-8');
-                $contextText = str_replace(["\r", "\n", "\t"], " ", $contextText);
-                $contextText = preg_replace('/\s+/', ' ', $contextText);
-                $contextText = trim($contextText);
-
-                if (empty($contextText)) {
-                    $contextText = "[Il file PDF '$fileName' non contiene testo selezionabile]";
-                }
-
+                $contextText = mb_convert_encoding($pdfDocument->getText(), 'UTF-8', 'UTF-8');
+                $contextText = preg_replace('/\s+/', ' ', str_replace(["\r", "\n", "\t"], " ", $contextText));
             } catch (\Exception $e) {
-                Log::error('Errore estrazione PDF: ' . $e->getMessage());
-                $contextText = "[Errore di lettura del file '$fileName']";
+                Log::error('Errore PDF: ' . $e->getMessage());
+                $contextText = "[Errore lettura file]";
             }
 
-            $chat->messages()->create([
-                'role' => 'user',
-                'content' => !empty($prompt) ? $prompt : "Analizza il file allegato ed esponi il contenuto.",
-                'file_name' => $fileName
-            ]);
+            $chat->messages()->create(['role' => 'user', 'content' => !empty($prompt) ? $prompt : "Analizza file", 'file_name' => $fileName]);
+            $fullAgentPrompt = "Nome: $fileName\nContesto: $contextText\n\nRichiesta: " . (!empty($prompt) ? $prompt : "Riassumi");
 
-            $finalQuestion = !empty($prompt) ? $prompt : "Fai un riassunto di questo documento";
-            $fullAgentPrompt = "Nome Documento: $fileName\nContesto Estratto: $contextText\n\nRichiesta Utente: $finalQuestion";
+            $agent = PdfChatAgent::make();
+            $hasFailedover = false;
 
             try {
-                $agentInstance = PdfChatAgent::make()
-                    ->chat(new UserMessage($fullAgentPrompt));
-                    
-                $messageInstance = $agentInstance->getMessage();
-                $aiResponse = $messageInstance->getContent();
-            } catch (\Exception $e) {
-                Log::error("Errore agente su PDF: " . $e->getMessage());
+                $aiResponse = $agent->chat(new UserMessage($fullAgentPrompt))->getMessage()->getContent();
                 
-                // 🎯 GESTIONE ERRORE NOT FOUND (404) SUL MODELLO
-                if (str_contains($e->getMessage(), '404') || str_contains($e->getMessage(), 'not found')) {
-                    $aiResponse = "❌ **Errore di Configurazione Modello (HTTP 404)**\n\nIl modello selezionato (*" . session('ai_model') . "*) non è stato trovato o non è supportato dal provider AI.\n\nPer favore, clicca sull'icona a forma di ingranaggio ⚙️ in alto a destra per cambiare il modello di IA (es. inserisci `gemini-1.5-flash` o `gemini-1.5-pro`) e riprova.";
-                } else {
-                    $aiResponse = "Si è verificato un errore nell'elaborazione del documento: " . $e->getMessage();
+                // Verifica reale del failover tramite l'istanza del Router nativo di Neuron
+                if ($agent->routerInstance && method_exists($agent->routerInstance, 'getActiveProviderId')) {
+                    if ($agent->routerInstance->getActiveProviderId() === 'backup') {
+                        $hasFailedover = true;
+                    }
                 }
+            } catch (\Exception $e) {
+                $aiResponse = "❌ **Errore critico:** Tutti i modelli configurati nel Router hanno fallito.\nDettaglio: " . $e->getMessage();
             }
 
-            $chat->messages()->create([
-                'role' => 'assistant',
-                'content' => $aiResponse
-            ]);
+            // Aggiungi il banner solo se il failover è avvenuto realmente
+            if ($hasFailedover) {
+                $aiResponse = "⚠️ **Sistema di Failover Attivo (Neuron AI):** Il modello principale configurato (*" . ucfirst($chosenProvider) . " - " . $chosenModel . "*) ha risposto con un errore. La richiesta è stata completata usando il modello di riserva configurato nel Router.\n\n---\n\n" . $aiResponse;
+            }
 
+            $chat->messages()->create(['role' => 'assistant', 'content' => $aiResponse]);
             return redirect()->route('chat.show', $chat->id);
         }
 
-        // 2. Caso standard: solo messaggio testuale senza file
+        // SCENARIO 2: Elaborazione messaggio di testo ordinario
         if (!empty($prompt)) {
-            $chat->messages()->create([
-                'role' => 'user',
-                'content' => $prompt
-            ]);
+            $chat->messages()->create(['role' => 'user', 'content' => $prompt]);
+
+            $agent = PdfChatAgent::make();
+            $hasFailedover = false;
 
             try {
-                Log::info("Inizio esecuzione Agente Neuron per prompt testuale.");
+                $aiResponse = $agent->chat(new UserMessage($prompt))->getMessage()->getContent();
                 
-                $agentInstance = PdfChatAgent::make()
-                    ->chat(new UserMessage($prompt));
-
-                $messageInstance = $agentInstance->getMessage();
-                $aiResponse = $messageInstance->getContent();
-                
-                Log::info("Risposta ricevuta dall'Agente Neuron: " . ($aiResponse ?? 'VUOTA'));
-
-                if (empty($aiResponse)) {
-                    $aiResponse = "L'agente ha elaborato la richiesta, ma la risposta è rimasta vuota.";
+                // Verifica reale del failover tramite l'istanza del Router nativo di Neuron
+                if ($agent->routerInstance && method_exists($agent->routerInstance, 'getActiveProviderId')) {
+                    if ($agent->routerInstance->getActiveProviderId() === 'backup') {
+                        $hasFailedover = true;
+                    }
                 }
-
             } catch (\Exception $e) {
-                Log::error("CRASH NEURON FRAMEWORK NELLA RISPOSTA: " . $e->getMessage());
-                
-                // 🎯 GESTIONE ERRORE NOT FOUND (404) SUL MODELLO PER MESSAGGI TESTUALI
-                if (str_contains($e->getMessage(), '404') || str_contains($e->getMessage(), 'not found')) {
-                    $aiResponse = "❌ **Errore di Configurazione Modello (HTTP 404)**\n\nIl modello selezionato (*" . session('ai_model') . "*) non è stato trovato o non è più supportato per questa chiamata.\n\nPer favore, clicca sull'icona a forma di ingranaggio ⚙️ in alto a destra, sostituisci il testo del modello attuale con un modello valido (come `gemini-1.5-flash`) e salva la configurazione.";
-                } else {
-                    $aiResponse = "Errore di comunicazione interna durante l'esecuzione dell'agente: " . $e->getMessage();
-                }
+                $aiResponse = "❌ **Servizio non disponibile:** Il Router di Neuron non è riuscito a ricevere risposta da nessun LLM.\nDettaglio: `" . $e->getMessage() . "`";
+            }
+
+            // Aggiungi il banner solo se il failover è avvenuto realmente
+            if ($hasFailedover) {
+                $aiResponse = "⚠️ **Sistema di Failover Attivo (Neuron AI):** Il modello principale configurato (*" . ucfirst($chosenProvider) . " - " . $chosenModel . "*) ha risposto con un errore. La richiesta è stata completata usando il modello di riserva configurato nel Router.\n\n---\n\n" . $aiResponse;
             }
             
-            $chat->messages()->create([
-                'role' => 'assistant',
-                'content' => $aiResponse
-            ]);
+            $chat->messages()->create(['role' => 'assistant', 'content' => $aiResponse]);
         }
 
         return redirect()->to('/chat/' . $chat->id);
     }
 
+    /**
+     * Rinomina il titolo di una chat esistente
+     */
     public function update(Request $request, $id)
     {
         $chat = Chat::findOrFail($id);
@@ -177,18 +162,14 @@ class ChatController extends Controller
         return redirect()->back();
     }
 
+    /**
+     * Elimina una chat e tutti i suoi messaggi collegati
+     */
     public function destroy($id)
     {
         $chat = Chat::findOrFail($id);
-        $currentUrl = url()->previous();
-        $isCurrent = str_contains($currentUrl, '/chat/' . $id);
-
         $chat->messages()->delete();
         $chat->delete();
-
-        if ($isCurrent) {
-            return redirect()->route('chat.index');
-        }
-        return redirect()->back();
+        return redirect()->route('chat.index');
     }
 }

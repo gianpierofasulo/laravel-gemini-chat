@@ -7,39 +7,44 @@ use NeuronAI\Agent\SystemPrompt;
 use NeuronAI\Providers\AIProviderInterface;
 use App\Neuron\Tools\WebSearchTool;
 
-// Namespace ufficiali di Neuron AI
+use NeuronAI\Router\RouterProvider;
 use NeuronAI\Providers\Gemini\Gemini; 
-use NeuronAI\Providers\OpenAI\OpenAI;
+use App\Neuron\Providers\GroqProvider;
 
 class PdfChatAgent extends Agent
 {
-    /**
-     * Definizione dinamica del Provider AI conforme a AIProviderInterface
-     */
+    public ?RouterProvider $routerInstance = null;
+
     protected function provider(): AIProviderInterface
     {
-        $providerName = session('ai_provider', env('AI_PROVIDER', 'google'));
-        $model = session('ai_model', env('GEMINI_MODEL', 'gemini-1.5-flash'));
-        
-        // 🎯 RECUPERO CHIAVE CON FALLBACK MULTIPLI PER EVITARE IL VALORE NULL
-        $apiKey = session('ai_key') 
-            ?: env('GEMINI_API_KEY') 
-            ?: env('GEMINI_KEY') 
-            ?: env('GOOGLE_API_KEY') 
-            ?: ''; // Se non trova nulla, passa una stringa vuota anziché null per evitare il crash di tipo
+        $primaryProvider = session('ai_provider', env('AI_PROVIDER', 'google'));
+        $primaryModel = session('ai_model', env('GEMINI_MODEL', 'gemini-3.1-flash-lite'));
+        $inputKey = session('ai_key');
 
-        if ($providerName === 'openai') {
-            $openAiKey = session('ai_key') ?: env('OPENAI_API_KEY') ?: '';
-            return new OpenAI(key: $openAiKey, model: $model);
+        $backupGeminiModel = env('GEMINI_MODEL', 'gemini-3.1-flash-lite');
+        $backupGroqModel = env('GROQ_MODEL', 'groq/compound');
+
+        if ($primaryProvider === 'groq') {
+            $groqKey   = $inputKey ?: env('GROQ_API_KEY') ?: '';
+            $geminiKey = env('GEMINI_API_KEY') ?: '';
+        } else {
+            $geminiKey = $inputKey ?: env('GEMINI_API_KEY') ?: '';
+            $groqKey   = env('GROQ_API_KEY') ?: '';
         }
 
-        // Default: Google Gemini - Riceve sempre una stringa (anche se vuota) evitando l'errore di tipo
-        return new Gemini(key: $apiKey, model: $model);
+        $this->routerInstance = RouterProvider::make();
+
+        if ($primaryProvider === 'groq') {
+            $this->routerInstance->addProvider('primary', new GroqProvider($groqKey, $primaryModel));
+            $this->routerInstance->addProvider('backup', new Gemini($geminiKey, $backupGeminiModel));
+        } else {
+            $this->routerInstance->addProvider('primary', new Gemini($geminiKey, $primaryModel));
+            $this->routerInstance->addProvider('backup', new GroqProvider($groqKey, $backupGroqModel));
+        }
+
+        return $this->routerInstance->setFallbackOrder('primary', 'backup');
     }
 
-    /**
-     * Istruzioni di sistema dell'agente (System Prompt)
-     */
     public function instructions(): string
     {
         return (string) new SystemPrompt(
@@ -48,17 +53,8 @@ class PdfChatAgent extends Agent
         );
     }
 
-    /**
-     * Registrazione condizionale dei Tool (Ricerca Internet)
-     */
     public function tools(): array
     {
-        if (session('disable_search', false) === true) {
-            return [];
-        }
-
-        return [
-            new WebSearchTool()
-        ];
+        return session('disable_search', false) ? [] : [new WebSearchTool()];
     }
 }

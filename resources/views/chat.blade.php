@@ -126,7 +126,7 @@
                         <select name="ai_provider" class="form-select form-select-sm">
                             <option value="google" {{ session('ai_provider') == 'google' ? 'selected' : '' }}>Google Gemini</option>
                             <option value="openai" {{ session('ai_provider') == 'openai' ? 'selected' : '' }}>OpenAI</option>
-                            <option value="anthropic" {{ session('ai_provider') == 'anthropic' ? 'selected' : '' }}>Anthropic Claude</option>
+                            <option value="groq" {{ session('ai_provider') == 'groq' ? 'selected' : '' }}>Groq</option>
                         </select>
                     </div>
                     <div class="mb-3">
