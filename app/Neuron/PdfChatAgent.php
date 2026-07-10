@@ -2,18 +2,46 @@
 
 namespace App\Neuron;
 
+use App\Models\NeuronChatMessage;
+use App\Neuron\Tools\WebSearchTool;
+use App\Neuron\Providers\GroqProvider;
 use NeuronAI\Agent\Agent;
 use NeuronAI\Agent\SystemPrompt;
+use NeuronAI\Chat\History\ChatHistoryInterface;
+use NeuronAI\Chat\History\EloquentChatHistory;
+use NeuronAI\Chat\History\InMemoryChatHistory;
 use NeuronAI\Providers\AIProviderInterface;
-use App\Neuron\Tools\WebSearchTool;
-
+use NeuronAI\Providers\Gemini\Gemini;
 use NeuronAI\Router\RouterProvider;
-use NeuronAI\Providers\Gemini\Gemini; 
-use App\Neuron\Providers\GroqProvider;
 
 class PdfChatAgent extends Agent
 {
     public ?RouterProvider $routerInstance = null;
+
+    protected ?string $threadId = null;
+
+    public static function forChat(int|string $chatId): static
+    {
+        $agent = static::make();
+        $agent->threadId = (string) $chatId;
+
+        return $agent;
+    }
+
+    protected function chatHistory(): ChatHistoryInterface
+    {
+        if ($this->threadId === null) {
+            return new InMemoryChatHistory(
+                contextWindow: (int) env('NEURON_CONTEXT_WINDOW', 150000)
+            );
+        }
+
+        return new EloquentChatHistory(
+            threadId: $this->threadId,
+            modelClass: NeuronChatMessage::class,
+            contextWindow: (int) env('NEURON_CONTEXT_WINDOW', 150000),
+        );
+    }
 
     protected function provider(): AIProviderInterface
     {

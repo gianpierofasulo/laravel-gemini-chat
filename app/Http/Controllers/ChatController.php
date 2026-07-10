@@ -3,13 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Models\Chat;
-use Illuminate\Http\Request;
-use Smalot\PdfParser\Parser;
-use Illuminate\Support\Facades\Log;
-
-// Agente personalizzato e classi del framework Neuron AI
+use App\Models\NeuronChatMessage;
 use App\Neuron\PdfChatAgent;
+use App\Services\NeuronChatHistorySeeder;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use NeuronAI\Chat\Messages\UserMessage;
+use Smalot\PdfParser\Parser;
 
 class ChatController extends Controller
 {
@@ -92,10 +92,12 @@ class ChatController extends Controller
                 $contextText = "[Errore lettura file]";
             }
 
+            NeuronChatHistorySeeder::seedIfNeeded($chat);
+
             $chat->messages()->create(['role' => 'user', 'content' => !empty($prompt) ? $prompt : "Analizza file", 'file_name' => $fileName]);
             $fullAgentPrompt = "Nome: $fileName\nContesto: $contextText\n\nRichiesta: " . (!empty($prompt) ? $prompt : "Riassumi");
 
-            $agent = PdfChatAgent::make();
+            $agent = PdfChatAgent::forChat($chat->id);
             $hasFailedover = false;
 
             try {
@@ -122,9 +124,11 @@ class ChatController extends Controller
 
         // SCENARIO 2: Elaborazione messaggio di testo ordinario
         if (!empty($prompt)) {
+            NeuronChatHistorySeeder::seedIfNeeded($chat);
+
             $chat->messages()->create(['role' => 'user', 'content' => $prompt]);
 
-            $agent = PdfChatAgent::make();
+            $agent = PdfChatAgent::forChat($chat->id);
             $hasFailedover = false;
 
             try {
@@ -168,6 +172,7 @@ class ChatController extends Controller
     public function destroy($id)
     {
         $chat = Chat::findOrFail($id);
+        NeuronChatMessage::where('thread_id', (string) $chat->id)->delete();
         $chat->messages()->delete();
         $chat->delete();
         return redirect()->route('chat.index');
